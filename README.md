@@ -3,8 +3,7 @@
 A two-wheeled self-balancing robot built around an ESP32, an IMU, and a cascaded PID control loop — with a live WiFi tuning interface and a dedicated wireless joystick controller.
 
 ![demo](media/balance_demo.gif)
-<!-- Replace with your actual video/gif — a short clip of it recovering + spinning in front of the camera is exactly the kind of proof-of-work that belongs here. -->
-
+   [Full-length demo (27s, MP4)](media/balance_full.mp4)
 ## Overview
 
 This robot balances on two wheels using a complementary filter for orientation estimation and a two-loop (cascaded) PID controller: an inner loop holds the body upright, and an outer loop corrects for long-term drift by tracking wheel velocity from quadrature encoders. It can be driven and steered two ways — a phone/browser joystick served directly from the robot's own WiFi access point, or a dedicated physical ESP32 + analog-joystick controller communicating over ESP-NOW.
