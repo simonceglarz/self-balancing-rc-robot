@@ -71,8 +71,6 @@ Both projects are pinned to the same platform version (see each `platformio.ini`
 
 ## Debugging notes / what I actually learned building this
 
-This is the part I'd want an interviewer to read, honestly — the balancing itself came together fast; getting it *stable and controllable* took real diagnosis:
-
 - **Output floor destroyed proportionality.** A flat "snap any nonzero output up to the motor's stiction floor" made the controller bang-bang, not proportional, for the entire range under a few degrees of error — the majority of actual operating time. Fixed by rescaling the output range onto `[MIN_OUTPUT, MAX_OUTPUT]` per motor instead of snapping.
 - **Encoder velocity math is a real kinematics problem, not an arbitrary sign choice.** Diagnosing whether `avgVelocity` should combine the two encoders by addition or subtraction meant understanding what each raw sign actually meant physically (translation vs. yaw), not just trying both and picking whichever "looked less bad." Verified empirically with a manual push test (motors disabled, print raw deltas) rather than guessing.
 - **A control loop can have the wrong sign of an otherwise-correct formula.** Reversing the encoder combination made the outer loop feed real motion back into itself as *positive* feedback instead of negative — the difference between correcting drift and amplifying it into a runaway, from one flipped sign.
