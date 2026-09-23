@@ -29,6 +29,15 @@ This robot balances on two wheels using a complementary filter for orientation e
 | Motor driver (dual H-bridge) | AIN1/AIN2, BIN1/BIN2 control |
 | 2-axis analog joystick module | physical controller input |
 | LiPo battery + voltage divider | robot power + monitoring via `analogReadMilliVolts()` |
+| Buck regulator (Adafruit MPM3610, 5V) | steps the 7.4V 2S LiPo down to 5V for the ESP32 |
+| Reverse-polarity protection (1N5822 Schottky) | sits ahead of the buck input, ~0.35V drop |
+
+## Build
+
+| | |
+|---|---|
+| ![Full assembled chassis](media/chassis_quarter_view.jpeg) | ![Inter-layer wiring detail](media/chassis_side_view.jpeg) |
+| Assembled 3-layer 3D-printed chassis — top plate carries the LiPo battery and OLED, middle plate holds the ESP32, IMU, and perfboard wiring, bottom plate mounts the motor driver. Brass standoffs separate the layers. | Rear view showing inter-layer wiring and one of the two drive wheels. |
 
 ## Architecture
 
@@ -51,6 +60,41 @@ IMU (accel + gyro) ──► complementary filter ──► angle estimate
 ```
 
 Input arrives from either the WebSocket ('J:x:y' from the webpage joystick, or discrete gain/calibration updates from the tuning sliders) or ESP-NOW (the physical joystick controller) — both write into the same `targetAngleTrim`/`steerBias` variables, so the control loop doesn't care which source is driving it.
+
+## Power Architecture
+2S LiPo (7.4V nominal, 8.4V full)
+             │
+             ▼
+1N5822 Schottky diode (reverse-polarity protection, ~0.35V drop)
+      │ 
+      ▼
+power node ──┬── DRV8833 VM (motors run off the unregulated battery rail)
+             ├── 2× 1000µF bulk caps + 100nF ceramic → GND
+             └── MPM3610 buck regulator (Vin)
+                    │
+                    ▼
+               5V out → ESP32 5V pin
+             │
+             ▼
+ESP32 internal LDO → 3.3V rail
+	    │
+┌───────────┼───────────┐
+▼           ▼           ▼
+IMU + OLED Encoder VCC DRV8833 SLP
+   (I2C)     (must be held high or driver sleeps)
+
+
+Motors draw directly off the unregulated battery rail (through the protection diode) since they don't need clean power; logic and sensors run off the regulated 5V → 3.3V chain, which does.
+
+**Bench-verified (multimeter):**
+
+| Measurement point | Reading |
+|---|---|
+| Diode cathode (post-protection) | 8.05 V |
+| MPM3610 output | 5.00 V |
+| ESP32 3.3V pin | 3.32 V |
+| Battery rail under full motor load | 7.77 V (no sag — bulk caps holding) |
+
 
 ## Setup
 
