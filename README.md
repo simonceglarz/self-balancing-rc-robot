@@ -95,6 +95,19 @@ Motors draw directly off the unregulated battery rail (through the protection di
 | ESP32 3.3V pin | 3.32 V |
 | Battery rail under full motor load | 7.77 V (no sag — bulk caps holding) |
 
+## Custom PCB (rev 1)
+
+The perfboard is being replaced by a 2-layer KiCad PCB (120 \C3\97 70 mm) that carries the ESP32, motor driver and buck converter on sockets.
+
+![PCB render](media/pcb/pcb_front_3d.png)
+
+- Separate I2C bus for the IMU, so OLED refreshes (~23 ms) can't delay the 100 Hz control loop
+- 8 GPIOs remapped so motor and encoder traces route without crossings; selected in firmware with `#define PCB_REV1`
+- Trace widths sized by current (1.5 mm battery, 1.0 mm motor, 0.5 mm 5 V)
+- 20-pin expansion header for v2 add-ons: servos, I2S speaker, UART and extra I2C sensors
+- Debug headers for motor PWM and encoder signals that sit under the modules
+
+**Status:** ordered from JLCPCB, bring-up in progress. Full write-up, pinouts and design notes: [`pcb/README.md`](pcb/README.md)
 
 ## Setup
 
