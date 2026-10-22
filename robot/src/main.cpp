@@ -12,11 +12,17 @@
 #define SDA_PIN 19
 #define SCL_PIN 18
 
+#define PCB_REV1 1    // 1 = PCB rev 1 wiring (OLED on bus B), 0 = old perfboard
+
+// Bus B (Wire1): OLED, J13/J14, J15 — PCB only
+#define OLED_SDA 21
+#define OLED_SCL 22
+
 // Motor driver — AIN1/AIN2 control Motor A, BIN1/BIN2 control Motor B.
-#define AIN1 26
-#define AIN2 32
-#define BIN1 25
-#define BIN2 33
+#define AIN1 32
+#define AIN2 33
+#define BIN1 26
+#define BIN2 25
 
 // NOTE: arduino-esp32 core 3.0+ removed manual channel numbers —
 // ledcAttach() below assigns a channel automatically per pin.
@@ -24,10 +30,10 @@
 // Encoders — A-channel pins are the interrupt pins.
 // GPIO 34/35 are input-only (no internal pull-up) — fine here,
 // encoders are pure inputs. Can't be used for motor drive.
-#define ENC_A1 27   // Motor A channel A
-#define ENC_B1 14   // Motor A channel B
-#define ENC_A2 34   // Motor B channel A
-#define ENC_B2 35   // Motor B channel B
+#define ENC_A_A 34   // Motor A channel A
+#define ENC_A_B 35   // Motor A channel B
+#define ENC_B_A 27   // Motor B channel A
+#define ENC_B_B 14   // Motor B channel B
 
 #define ENABLE_BATTERY_MONITOR 1
 #if ENABLE_BATTERY_MONITOR
@@ -64,22 +70,23 @@ const bool INVERT_ENC_B   = false;
 #define RUN_I2C_SCANNER 0
 
 #if RUN_I2C_SCANNER
-void runI2CScanner() {
-    Serial.println("I2C Scanner starting...");
-    while (1) {
-        byte count = 0;
-        for (byte addr = 1; addr < 127; addr++) {
-            Wire.beginTransmission(addr);
-            byte error = Wire.endTransmission();
-            if (error == 0) {
-                Serial.print("Device found at address 0x");
-                if (addr < 16) Serial.print("0");
-                Serial.println(addr, HEX);
-                count++;
-            }
+void scanBus(TwoWire &bus, const char *label) {
+    Serial.printf("Bus %s:\n", label);
+    byte count = 0;
+    for (byte addr = 1; addr < 127; addr++) {
+        bus.beginTransmission(addr);
+        if (bus.endTransmission() == 0) {
+            Serial.printf("  device at 0x%02X\n", addr);
+            count++;
         }
-        if (count == 0) Serial.println("No I2C devices found");
-        else { Serial.print(count); Serial.println(" device(s) found"); }
+    }
+    if (count == 0) Serial.println("  no devices");
+}
+
+void runI2CScanner() {
+    while (1) {
+        scanBus(Wire,  "A (IMU, 19/18)");
+        scanBus(Wire1, "B (OLED, 21/22)");
         delay(3000);
     }
 }
@@ -88,8 +95,11 @@ void runI2CScanner() {
 // =================== Objects ===================
 Adafruit_LSM6DSOX sox;                          // IMU driver instance — talks to the
                                                  // physical sensor over I2C once Wire.begin() runs
-Adafruit_SSD1306 display(128, 64, &Wire, -1);   // OLED driver — 128x64 px, shares the I2C bus
-                                                 // with the IMU (-1 = no dedicated reset pin wired)
+#if PCB_REV1
+Adafruit_SSD1306 display(128, 64, &Wire1, -1);   // OLED alone on bus B
+#else
+Adafruit_SSD1306 display(128, 64, &Wire, -1);    // perfboard: shared with IMU
+#endif
 
 // Network name/password the ESP32 broadcasts. Since we're in AP mode,
 // the ESP32 *is* the WiFi network — your phone connects to "BalanceBot"
@@ -128,6 +138,7 @@ volatile float targetAngleTrim = 0.0;   // "goal" value set instantly by F/B com
                                          // it directly, to avoid a derivative-kick step.
 volatile float steerBias = 0.0;         // "goal" value set instantly by L/R commands —
                                          // same ramping treatment via steerBiasSmoothed.
+volatile float Kp_yaw = 0.5;
 
 // =================== Outer loop gains (WiFi-tunable via V/W) ===================
 volatile float Kp_vel = 0.12;
@@ -156,6 +167,8 @@ float gyroBias = 0.0;
 float angleErrorIntegral = 0.0;
 const float INTEGRAL_CLAMP = 100.0;
 float velIntegral = 0.0;
+float yawRef = 0.0;
+
 const int MAX_OUTPUT = 255;
 
 // Per-motor stiction floors — NOT assumed equal. Testing found motor A's
@@ -173,7 +186,7 @@ volatile int MIN_OUTPUT_B = 146;
 volatile float MOTOR_A_SCALE = 1.0;
 volatile float MOTOR_B_SCALE = 1.0;
 
-const float FALL_CUTOFF_DEG = 45.0;
+volatile float FALL_CUTOFF_DEG = 55.0;
 
 // Exponential-moving-average state for the encoder-derived velocity —
 // see avgVelocityFiltered below. 0.1 is a starting guess, not a derived
@@ -203,12 +216,12 @@ volatile long countB = 0;
 long lastCountA = 0, lastCountB = 0;
 
 void IRAM_ATTR encA_ISR() {
-    bool state = digitalRead(ENC_A1) == digitalRead(ENC_B1);
+    bool state = digitalRead(ENC_A_A) == digitalRead(ENC_A_B);
     if (INVERT_ENC_A) state = !state;
     if (state) countA++; else countA--;
 }
 void IRAM_ATTR encB_ISR() {
-    bool state = digitalRead(ENC_A2) == digitalRead(ENC_B2);
+    bool state = digitalRead(ENC_B_A) == digitalRead(ENC_B_B);
     if (INVERT_ENC_B) state = !state;
     if (state) countB++; else countB--;
 }
@@ -291,8 +304,8 @@ void runBasicMotorGyroTest() {
     Serial.println("IMU found!");
     sox.setAccelRange(LSM6DS_ACCEL_RANGE_4_G);
     sox.setGyroRange(LSM6DS_GYRO_RANGE_500_DPS);
-    sox.setAccelDataRate(LSM6DS_RATE_104_HZ);
-    sox.setGyroDataRate(LSM6DS_RATE_104_HZ);
+    sox.setAccelDataRate(LSM6DS_RATE_416_HZ);
+    sox.setGyroDataRate(LSM6DS_RATE_416_HZ);
 
     ledcAttach(AIN1, 20000, 8);
     ledcAttach(AIN2, 20000, 8);
@@ -425,6 +438,8 @@ h3{margin:14px 0 2px 0;font-size:14px;color:#aaf}
 <h3>Calibration — tune FIRST, before anything above</h3>
 <p>Angle Trim <span id="tv">-2.2</span> deg</p>
 <div class="row"><button class="nudge" onclick="nudge('t','tv','X',-0.1,1)">-</button><input id="t" type="range" min="-15" max="15" step="0.1" value="-2.2"><button class="nudge" onclick="nudge('t','tv','X',0.1,1)">+</button></div>
+<p>Fall Cutoff <span id="kcv">45</span> deg</p>
+<div class="row"><button class="nudge" onclick="nudge('kc','kcv','K',-1,0)">-</button><input id="kc" type="range" min="20" max="80" step="1" value="45"><button class="nudge" onclick="nudge('kc','kcv','K',1,0)">+</button></div>
 <p>Min Output A <span id="mv">155</span></p>
 <div class="row"><button class="nudge" onclick="nudge('m','mv','M',-1,0)">-</button><input id="m" type="range" min="0" max="255" step="1" value="155"><button class="nudge" onclick="nudge('m','mv','M',1,0)">+</button></div>
 
@@ -527,6 +542,7 @@ ws.onmessage = function(evt){
     setSlider('t','tv', v[6]);
     setSlider('m','mv', v[7]);
     setSlider('c','cv', v[8]);
+    setSlider('kc','kcv', v[11]);
   }
 };
 document.getElementById('p').oninput = e => { document.getElementById('pv').innerText=e.target.value; send('P:'+e.target.value); };
@@ -537,6 +553,7 @@ document.getElementById('ki2').oninput = e => { document.getElementById('kiv').i
 document.getElementById('t').oninput = e => { document.getElementById('tv').innerText=e.target.value; send('X:'+e.target.value); };
 document.getElementById('m').oninput = e => { document.getElementById('mv').innerText=e.target.value; send('M:'+e.target.value); };
 document.getElementById('c').oninput = e => { document.getElementById('cv').innerText=e.target.value; send('C:'+e.target.value); };
+document.getElementById('kc').oninput = e => {document.getElementById('kcv').innerText=e.target.value; send('K:'+e.target.value); };
 </script></body></html>
 )HTML";
 
@@ -551,10 +568,11 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         char buf[128];
         float kp = Kp, ki = Ki, kd = Kd, kpv = Kp_vel, kiv = Ki_vel;
         float trim = ANGLE_TRIM_DEG;
+        float cutoff = FALL_CUTOFF_DEG;
         int minA = MIN_OUTPUT_A, minB = MIN_OUTPUT_B;
         float scaleA = MOTOR_A_SCALE, scaleB = MOTOR_B_SCALE;
-        snprintf(buf, sizeof(buf), "Y:%.2f:%.2f:%.2f:%.3f:%.4f:%.1f:%d:%d:%.2f:%.2f",
-                 kp, ki, kd, kpv, kiv, trim, minA, minB, scaleA, scaleB);
+        snprintf(buf, sizeof(buf), "Y:%.2f:%.2f:%.2f:%.3f:%.4f:%.1f:%d:%d:%.2f:%.2f:%.1f",
+                 kp, ki, kd, kpv, kiv, trim, minA, minB, scaleA, scaleB, cutoff);
         client->text(buf);
         return;
     }
@@ -578,6 +596,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
         case 'L': steerBias       = val ?  30.0 : 0.0; break;   // swapped — was backwards
         case 'R': steerBias       = val ? -30.0 : 0.0; break;   // swapped — was backwards
         case 'S': targetAngleTrim = 0.0; steerBias = 0.0; break;
+        case 'K': FALL_CUTOFF_DEG = constrain(val, 20.0, 80.0); break;
         case 'J': {
             // "J:x:y" — x,y each in [-1, 1] from the on-page joystick.
             // Reuses the same targetAngleTrim/steerBias variables (and
@@ -622,7 +641,11 @@ void setupTuningInterface() {
 // =================== Setup ===================
 void setup() {
     Serial.begin(115200);
-    Wire.begin(SDA_PIN, SCL_PIN);
+    Wire.begin(SDA_PIN, SCL_PIN);   //bus A: IMU only (GPIO19/18)
+
+    #if PCB_REV1
+    Wire1.begin(OLED_SDA, OLED_SCL);
+    #endif
 
     #if RUN_I2C_SCANNER
     runI2CScanner();  // never returns — halts here, skips everything else
@@ -650,10 +673,10 @@ void setup() {
     ledcAttach(BIN2, 20000, 8);
     motorA(0); motorB(0);
 
-    pinMode(ENC_A1, INPUT); pinMode(ENC_B1, INPUT);
-    pinMode(ENC_A2, INPUT); pinMode(ENC_B2, INPUT);
-    attachInterrupt(digitalPinToInterrupt(ENC_A1), encA_ISR, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(ENC_A2), encB_ISR, CHANGE);
+    pinMode(ENC_A_A, INPUT); pinMode(ENC_A_B, INPUT);
+    pinMode(ENC_B_A, INPUT); pinMode(ENC_B_B, INPUT);
+    attachInterrupt(digitalPinToInterrupt(ENC_A_A), encA_ISR, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC_B_A), encB_ISR, CHANGE);
 
     // THIS CALL WAS MISSING in the pasted version — without it, the
     // function above is defined but never runs, and setup() falls
@@ -739,6 +762,7 @@ void loop() {
         motorA(0); motorB(0);
         angleErrorIntegral = 0;
         velIntegral = 0;
+        yawRef = 0;
         avgVelocityFiltered = 0.0;        // reset smoothing too — don't carry stale
                                            // velocity history into the next stand-up
         targetAngleTrimSmoothed = 0.0;    // don't carry a mid-ramp command into the
@@ -860,15 +884,18 @@ void loop() {
         int headroom = min(headroomA, headroomB);
         float safeSteer = constrain(steerBiasSmoothed, (float)-headroom, (float)headroom);
 
+        
         motorA((int)(outA * MOTOR_A_SCALE) + (int)safeSteer);
         motorB((int)(outB * MOTOR_B_SCALE) - (int)safeSteer);
-
-        if (now - lastTelemetry >= 50) {
-            lastTelemetry = now;
-            String frame = "T:" + String(angle, 1) + ":" + String(output);
-            ws.textAll(frame);
-        }
     }
+
+    if (now - lastTelemetry >= 50) {
+        lastTelemetry = now;
+        String frame = "T:" + String(angle, 1) + ":" + String(output);
+        ws.textAll(frame);
+    }
+    
+    
 
     // ---- OLED, throttled to 10Hz ----
     if (now - lastDisplay >= 100) {
